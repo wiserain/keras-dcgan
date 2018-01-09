@@ -1,12 +1,12 @@
 from keras.models import Sequential
-from keras.layers import Dense
-from keras.layers import Reshape
-from keras.layers.core import Activation
+from keras.layers import Reshape, AveragePooling2D, Dense, Dropout, Flatten
+from keras.layers.core import Activation, Flatten
 from keras.layers.normalization import BatchNormalization
-from keras.layers.convolutional import UpSampling2D
-from keras.layers.convolutional import Conv2D, MaxPooling2D
-from keras.layers.core import Flatten
-from keras.optimizers import SGD
+from keras.layers.convolutional import Conv2D, Conv2DTranspose
+from keras.layers.advanced_activations import LeakyReLU
+from keras.optimizers import SGD, Adam
+from keras import initializers
+from keras.utils.generic_utils import Progbar
 from keras.datasets import mnist
 import numpy as np
 from PIL import Image
@@ -25,38 +25,44 @@ os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 
 def generator_model():
     model = Sequential()
-    model.add(Dense(units=1024, input_dim=100))
-    model.add(Activation('tanh'))
-    model.add(Dense(128*7*7))
-    model.add(BatchNormalization())
-    model.add(Activation('tanh'))
-    model.add(Reshape((7, 7, 128), input_shape=(128*7*7,)))
-    model.add(UpSampling2D(size=(2, 2)))
-    model.add(Conv2D(64, (5, 5), padding='same'))
-    model.add(Activation('tanh'))
-    model.add(UpSampling2D(size=(2, 2)))
-    model.add(Conv2D(1, (5, 5), padding='same'))
-    model.add(Activation('tanh'))
-    return model
 
+    model.add(Dense(3 * 3 * 384, input_dim=100, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
+    model.add(BatchNormalization())
+    model.add(LeakyReLU(0.2))
+    model.add(Reshape((3, 3, 384)))
+
+    model.add(Conv2DTranspose(192, 5, strides=1, padding='valid'))
+    model.add(BatchNormalization(axis=-1))
+    model.add(LeakyReLU(0.2))
+
+    model.add(Conv2DTranspose(96, 5, strides=2, padding='same'))
+    model.add(BatchNormalization(axis=-1))
+    model.add(LeakyReLU(0.2))
+
+    model.add(Conv2DTranspose(1, 5, strides=2, padding='same',activation='tanh'))
+    return model
 
 def discriminator_model():
     model = Sequential()
-    model.add(
-            Conv2D(64, (5, 5),
-            padding='same',
-            input_shape=(28, 28, 1))
-            )
-    model.add(Activation('tanh'))
-    model.add(MaxPooling2D(pool_size=(2, 2)))
-    model.add(Conv2D(128, (5, 5)))
-    model.add(Activation('tanh'))
-    model.add(MaxPooling2D(pool_size=(2, 2)))
+
+    model.add(Conv2D(32, (3, 3),padding='same',strides=2,input_shape=(28, 28, 1)))
+    model.add(LeakyReLU(0.2))
+    model.add(Dropout(0.3))
+
+    model.add(Conv2D(64,3,padding='same', strides=1))
+    model.add(LeakyReLU(0.2))
+    model.add(Dropout(0.3))
+
+    model.add(Conv2D(128,3,padding='same', strides=2))
+    model.add(LeakyReLU(0.2))
+    model.add(Dropout(0.3))
+
+    model.add(Conv2D(256,3,padding='same', strides=1))
+    model.add(LeakyReLU(0.2))
+    model.add(Dropout(0.3))
+
     model.add(Flatten())
-    model.add(Dense(1024))
-    model.add(Activation('tanh'))
-    model.add(Dense(1))
-    model.add(Activation('sigmoid'))
+    model.add(Dense(1, activation='sigmoid'))
     return model
 
 
@@ -83,34 +89,62 @@ def combine_images(generated_images):
     return image
 
 
-def plot(x,y1,y2,xlabel,ylabel1,ylabel2,loss_file):
-    plt.figure(num=None, figsize=(16,12), dpi=100, facecolor='w', edgecolor='k')
+def plot(x,y1,y2,xlabel,ylabel,ylabel1,ylabel2,loss_file):
+    plt.figure(num=None, figsize=(8,6), dpi=100, facecolor='w', edgecolor='k')
     plt.plot(x, y1, 'b', label=ylabel1, linewidth=0.7)
     plt.plot(x, y2, 'g', label=ylabel2, linewidth=0.7)
     plt.legend()
     plt.minorticks_on()
     plt.xlabel(xlabel)
-    plt.ylabel(ylabel1)
-    plt.ylabel(ylabel2)
-    #plt.yticks(np.arange(0, 2.5, 0.1))
+    plt.ylabel(ylabel)
     plt.grid(b=True, which='major', color='k', linestyle='-')
     plt.grid(b=True, which='minor', color='0.5', linestyle='--', linewidth=0.5)
     plt.savefig(loss_file)
     plt.close()
 
 def train(BATCH_SIZE):
-    (X_train, y_train), (X_test, y_test) = mnist.load_data()
-    X_train = (X_train.astype(np.float32) - 127.5)/127.5
-    X_train = X_train[:, :, :, None]
-    X_test = X_test[:, :, :, None]
-    # X_train = X_train.reshape((X_train.shape, 1) + X_train.shape[1:])
-    d = discriminator_model()
-    g = generator_model()
 
-    # model summary
+    # saving results to
     model_dir = './models'
     if not os.path.exists(model_dir):
-		os.mkdir(model_dir)		
+        os.mkdir(model_dir)
+    val_dir = './vals'
+    if not os.path.exists(val_dir):
+        os.mkdir(val_dir)
+    log_dir = './logs'
+    if not os.path.exists(log_dir):
+        os.mkdir(log_dir)
+
+    nepoch = 200
+
+    (X_train, y_train), (X_test, y_test) = mnist.load_data()
+
+    # ganhacks 1: normalize inputs
+    X_train = (X_train.astype(np.float32) - 127.5)/127.5
+    X_train = np.expand_dims(X_train, axis=-1)
+
+    lr = 2e-4
+
+    # generator
+    g = generator_model()
+    g_optim = Adam(lr=lr, beta_1=0.5)
+    g.compile(loss='binary_crossentropy', optimizer=g_optim)
+
+    # discriminator
+    d = discriminator_model()
+
+    # gan: g+d
+    gan_optim = Adam(lr=lr, beta_1=0.5)
+    gan = generator_containing_discriminator(g, d)
+    gan.compile(loss='binary_crossentropy', optimizer=gan_optim)
+
+    # discriminator compile
+    d_optim = Adam(lr=lr, beta_1=0.5)
+    d.trainable = True
+    d.compile(loss='binary_crossentropy', optimizer=d_optim)
+
+
+    # model summary
     with open(model_dir + '/discriminator.txt','w') as fh:
     	d.summary(print_fn=lambda x: fh.write(x + '\n'))
 	with open(model_dir + '/generator.txt','w') as fh:
@@ -118,50 +152,53 @@ def train(BATCH_SIZE):
     plot_model(d, to_file=model_dir+'/discriminator.png')
     plot_model(g, to_file=model_dir+'/generator.png')
 
-    val_dir = './val'
-    if not os.path.exists(val_dir):
-		os.mkdir(val_dir)		
-
-    log_dir = './logs'
-    if not os.path.exists(log_dir):
-		os.mkdir(log_dir)	
-
-    d_on_g = generator_containing_discriminator(g, d)
-    d_optim = SGD(lr=0.0005, momentum=0.9, nesterov=True)
-    g_optim = SGD(lr=0.0005, momentum=0.9, nesterov=True)
-    g.compile(loss='binary_crossentropy', optimizer="SGD")
-    d_on_g.compile(loss='binary_crossentropy', optimizer=g_optim)
-    d.trainable = True
-    d.compile(loss='binary_crossentropy', optimizer=d_optim)
 
     d_losses_epoch = []
     g_losses_epoch = []
-    for epoch in range(100):
+    for epoch in range(1,nepoch+1):
+
         d_losses = []
         g_losses = []
-        for index in range(int(X_train.shape[0]/BATCH_SIZE)):
-            noise = np.random.uniform(-1, 1, size=(BATCH_SIZE, 100))
+
+        num_batches = int(X_train.shape[0]/BATCH_SIZE)
+        progress_bar = Progbar(target=num_batches)
+
+        for index in range(num_batches):
+
+            # ganhacks 3: sample from Gaussian
+            noise = 0.5 * np.random.normal(0, 1, size=[BATCH_SIZE, 100])
             image_batch = X_train[index*BATCH_SIZE:(index+1)*BATCH_SIZE]
+
+            # generage fake mnist images
             generated_images = g.predict(noise, verbose=0)
+
+            # train discriminator
             X = np.concatenate((image_batch, generated_images))
-            y = [1] * BATCH_SIZE + [0] * BATCH_SIZE
-            d_loss = d.train_on_batch(X, y)
-            noise = np.random.uniform(-1, 1, (BATCH_SIZE, 100))
+            yD = [0.9] * BATCH_SIZE + [0.] * BATCH_SIZE          # hard label
+            # yD += 0.05 * np.random.normal(size=(2*BATCH_SIZE,))
+            d_loss = d.train_on_batch(X, yD)
+
+            # train generator
+            noise = 0.5 * np.random.normal(0, 1, size=[BATCH_SIZE, 100])
             d.trainable = False
-            g_loss = d_on_g.train_on_batch(noise, [1] * BATCH_SIZE)
+            yG = [1.] * BATCH_SIZE
+            # yG += 0.05 * np.random.normal(size=(BATCH_SIZE,))
+            g_loss = gan.train_on_batch(noise, yG)
             d.trainable = True
 
             d_losses.append(d_loss)
             g_losses.append(g_loss)
 
+            progress_bar.update(index + 1)
+
         d_losses_epoch.append(np.mean(d_losses))
         g_losses_epoch.append(np.mean(g_losses))
-        print("epoch %03d) d_loss : %f / g_loss : %f" % (epoch, d_losses_epoch[-1], g_losses_epoch[-1]))
-        
+        print("Epoch {:03d}/{:03d} - d_loss: {} -  g_loss: {}".format(epoch, nepoch, d_losses_epoch[-1], g_losses_epoch[-1]))
+
         # plot losses
         loss_file_name = log_dir + '/epoch-{:03d}.png'.format(epoch)
-        plot([x+1 for x in range(epoch+1)],d_losses_epoch,g_losses_epoch,
-        	'epoch','discriminator','generator',loss_file_name)
+        plot([x for x in range(1,epoch+1)],d_losses_epoch,g_losses_epoch,
+        	'epoch','loss','discriminator','generator',loss_file_name)
 
         # save weights
         g.save_weights(model_dir+'/generator.h5', True)
@@ -175,13 +212,13 @@ def train(BATCH_SIZE):
 
 
 def generate(BATCH_SIZE, nice=False):
-    g = generator_model()
-    g.compile(loss='binary_crossentropy', optimizer="SGD")
     model_dir = './models'
+    g = generator_model()
+    g.compile(loss='binary_crossentropy', optimizer="Adam")
     g.load_weights(model_dir+'/generator.h5')
     if nice:
         d = discriminator_model()
-        d.compile(loss='binary_crossentropy', optimizer="SGD")
+        d.compile(loss='binary_crossentropy', optimizer="Adam")
         d.load_weights(model_dir+'/discriminator.h5')
         noise = np.random.uniform(-1, 1, (BATCH_SIZE*20, 100))
         generated_images = g.predict(noise, verbose=1)
