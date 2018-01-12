@@ -1,5 +1,5 @@
-from keras.models import Sequential
-from keras.layers import Reshape, AveragePooling2D, Dense, Dropout, Flatten
+from keras.models import Sequential, Model
+from keras.layers import Input, Reshape, AveragePooling2D, Dense, Dropout, Flatten
 from keras.layers.core import Activation, Flatten
 from keras.layers.normalization import BatchNormalization
 from keras.layers.convolutional import Conv2D, Conv2DTranspose
@@ -16,6 +16,7 @@ import math
 import os
 from keras.utils import plot_model
 import matplotlib.pyplot as plt
+from scipy.ndimage.filters import gaussian_filter
 
 ##################################################################
 os.environ["CUDA_DEVICE_ORDER"] = "PCI_BUS_ID"   # see issue #152
@@ -23,55 +24,62 @@ os.environ["CUDA_VISIBLE_DEVICES"] = "0"
 
 os.environ['TF_CPP_MIN_LOG_LEVEL']='2'
 
+
 def generator_model():
-    model = Sequential()
+    inputs = Input(shape=(28,28,1))
+    x = Flatten()(inputs)
 
-    model.add(Dense(3 * 3 * 384, input_dim=100, kernel_initializer=initializers.RandomNormal(stddev=0.02)))
-    model.add(BatchNormalization())
-    model.add(LeakyReLU(0.2))
-    model.add(Reshape((3, 3, 384)))
+    x = Dense(3*3*384,kernel_initializer=initializers.RandomNormal(stddev=0.02))(x)
+    x = BatchNormalization()(x)
+    x = LeakyReLU(0.2)(x)
+    x = Reshape((3,3,384))(x)
 
-    model.add(Conv2DTranspose(192, 5, strides=1, padding='valid'))
-    model.add(BatchNormalization(axis=-1))
-    model.add(LeakyReLU(0.2))
+    x = Conv2DTranspose(192,5,strides=1,padding='valid')(x)
+    x = BatchNormalization(axis=-1)(x)
+    x = LeakyReLU(0.2)(x)
 
-    model.add(Conv2DTranspose(96, 5, strides=2, padding='same'))
-    model.add(BatchNormalization(axis=-1))
-    model.add(LeakyReLU(0.2))
+    x = Conv2DTranspose(96, 5, strides=2, padding='same')(x)
+    x = BatchNormalization(axis=-1)(x)
+    x = LeakyReLU(0.2)(x)
 
-    model.add(Conv2DTranspose(1, 5, strides=2, padding='same',activation='tanh'))
-    return model
+    x = Conv2DTranspose(1, 5, strides=2, padding='same',activation='tanh')(x)
+    return Model(inputs,x)
 
 def discriminator_model():
-    model = Sequential()
+    inputs = Input(shape=(28,28,1))
 
-    model.add(Conv2D(32, (3, 3),padding='same',strides=2,input_shape=(28, 28, 1)))
-    model.add(LeakyReLU(0.2))
-    model.add(Dropout(0.3))
+    x = Conv2D(32, (3, 3),padding='same',strides=2)(inputs)
+    x = LeakyReLU(0.2)(x)
+    x = Dropout(0.3)(x)
 
-    model.add(Conv2D(64,3,padding='same', strides=1))
-    model.add(LeakyReLU(0.2))
-    model.add(Dropout(0.3))
+    x = Conv2D(64,3,padding='same', strides=1)(x)
+    x = LeakyReLU(0.2)(x)
+    x = Dropout(0.3)(x)
 
-    model.add(Conv2D(128,3,padding='same', strides=2))
-    model.add(LeakyReLU(0.2))
-    model.add(Dropout(0.3))
+    x = Conv2D(128,3,padding='same', strides=2)(x)
+    x = LeakyReLU(0.2)(x)
+    x = Dropout(0.3)(x)
 
-    model.add(Conv2D(256,3,padding='same', strides=1))
-    model.add(LeakyReLU(0.2))
-    model.add(Dropout(0.3))
+    x = Conv2D(256,3,padding='same', strides=1)(x)
+    x = LeakyReLU(0.2)(x)
+    x = Dropout(0.3)(x)
 
-    model.add(Flatten())
-    model.add(Dense(1, activation='sigmoid'))
-    return model
+    x = Flatten()(x)
+    x = Dense(1, activation='sigmoid')(x)
+    return Model(inputs,x)
 
 
 def generator_containing_discriminator(g, d):
-    model = Sequential()
-    model.add(g)
+    inputs = Input((28,28,1))
+    generated = g(inputs)
     d.trainable = False
-    model.add(d)
-    return model
+    discriminated = d(generated)
+    return Model(inputs,[generated,discriminated])
+    # model = Sequential()
+    # model.add(g)
+    # d.trainable = False
+    # model.add(d)
+    # return model
 
 
 def combine_images(generated_images):
@@ -107,28 +115,56 @@ def train(BATCH_SIZE):
     # saving results to
     model_dir = './models'
     if not os.path.exists(model_dir):
-        os.mkdir(model_dir)
+        os.mkdir(model_dir)     
     val_dir = './vals'
     if not os.path.exists(val_dir):
         os.mkdir(val_dir)
     log_dir = './logs'
     if not os.path.exists(log_dir):
         os.mkdir(log_dir)
+    test_dir = './tests'
+    if not os.path.exists(test_dir):
+        os.mkdir(test_dir)
 
     nepoch = 200
 
     (X_train, y_train), (X_test, y_test) = mnist.load_data()
 
+    # put some blur
+    rand_sig = np.random.uniform(2,8,size=(X_train.shape[0]))
+    X_train_no = [x.astype(np.float32)+gaussian_filter(x,rand_sig[i]) for i,x in enumerate(X_train)]
+    X_train_no = np.array(X_train_no)
+    X_train_no = np.round(np.clip(X_train_no,0,255))
+
+    rand_sig = np.random.uniform(2,8,size=(X_test.shape[0]))
+    X_test_no = [x.astype(np.float32)+gaussian_filter(x,rand_sig[i]) for i,x in enumerate(X_test)]
+    X_test_no = np.array(X_test_no)
+    X_test_no = np.round(np.clip(X_test_no,0,255))
+
     # ganhacks 1: normalize inputs
     X_train = (X_train.astype(np.float32) - 127.5)/127.5
     X_train = np.expand_dims(X_train, axis=-1)
+
+    X_train_no = (X_train_no.astype(np.float32) - 127.5)/127.5
+    X_train_no = np.expand_dims(X_train_no, axis=-1)
+
+    X_test = (X_test.astype(np.float32) - 127.5)/127.5
+    X_test = np.expand_dims(X_test, axis=-1)
+
+    X_test_no = (X_test_no.astype(np.float32) - 127.5)/127.5
+    X_test_no = np.expand_dims(X_test_no, axis=-1)
+
+    # ensure unpaired
+    X_train_no1 = X_train_no[np.random.permutation(X_train_no.shape[0])]
+    X_train_no2 = X_train_no[np.random.permutation(X_train_no.shape[0])]
 
     lr = 2e-4
 
     # generator
     g = generator_model()
     g_optim = Adam(lr=lr, beta_1=0.5)
-    g.compile(loss='binary_crossentropy', optimizer=g_optim)
+    # g.compile(loss='binary_crossentropy', optimizer=g_optim)
+    g.compile(loss='mae', optimizer=g_optim)
 
     # discriminator
     d = discriminator_model()
@@ -136,14 +172,14 @@ def train(BATCH_SIZE):
     # gan: g+d
     gan_optim = Adam(lr=lr, beta_1=0.5)
     gan = generator_containing_discriminator(g, d)
-    gan.compile(loss='binary_crossentropy', optimizer=gan_optim)
+    gan.compile(loss=['mae','binary_crossentropy'], optimizer=gan_optim)
 
     # discriminator compile
     d_optim = Adam(lr=lr, beta_1=0.5)
     d.trainable = True
     d.compile(loss='binary_crossentropy', optimizer=d_optim)
 
-
+    
     # model summary
     with open(model_dir + '/discriminator.txt','w') as fh:
     	d.summary(print_fn=lambda x: fh.write(x + '\n'))
@@ -165,25 +201,25 @@ def train(BATCH_SIZE):
 
         for index in range(num_batches):
 
-            # ganhacks 3: sample from Gaussian
-            noise = 0.5 * np.random.normal(0, 1, size=[BATCH_SIZE, 100])
-            image_batch = X_train[index*BATCH_SIZE:(index+1)*BATCH_SIZE]
-
-            # generage fake mnist images
-            generated_images = g.predict(noise, verbose=0)
+            image_no = X_train_no1[index*BATCH_SIZE:(index+1)*BATCH_SIZE]
+            image_clean = X_train[index*BATCH_SIZE:(index+1)*BATCH_SIZE]
+            
+            # generate fake/denoised mnist images
+            generated_images = g.predict(image_no, verbose=0)
 
             # train discriminator
-            X = np.concatenate((image_batch, generated_images))
+            X = np.concatenate((image_clean, generated_images))
             yD = [0.9] * BATCH_SIZE + [0.] * BATCH_SIZE          # hard label
             # yD += 0.05 * np.random.normal(size=(2*BATCH_SIZE,))
             d_loss = d.train_on_batch(X, yD)
-
+            
             # train generator
-            noise = 0.5 * np.random.normal(0, 1, size=[BATCH_SIZE, 100])
+            image_no = X_train_no2[index*BATCH_SIZE:(index+1)*BATCH_SIZE]
             d.trainable = False
-            yG = [1.] * BATCH_SIZE
+            yG = np.ones((BATCH_SIZE,))
             # yG += 0.05 * np.random.normal(size=(BATCH_SIZE,))
-            g_loss = gan.train_on_batch(noise, yG)
+            # g_loss = gan.train_on_batch(image_no, yG)
+            g_loss = gan.train_on_batch(image_no, [image_no,yG])
             d.trainable = True
 
             d_losses.append(d_loss)
@@ -193,8 +229,8 @@ def train(BATCH_SIZE):
 
         d_losses_epoch.append(np.mean(d_losses))
         g_losses_epoch.append(np.mean(g_losses))
-        print("Epoch {:03d}/{:03d} - d_loss: {} -  g_loss: {}".format(epoch, nepoch, d_losses_epoch[-1], g_losses_epoch[-1]))
-
+        print("Epoch {:03d}/{:03d} - d_loss: {:5f} -  g_loss: {:5f}".format(epoch, nepoch, d_losses_epoch[-1], g_losses_epoch[-1]))
+        
         # plot losses
         loss_file_name = log_dir + '/epoch-{:03d}.png'.format(epoch)
         plot([x for x in range(1,epoch+1)],d_losses_epoch,g_losses_epoch,
@@ -205,10 +241,30 @@ def train(BATCH_SIZE):
         d.save_weights(model_dir+'/discriminator.h5', True)
 
         # save results from training
-        image = combine_images(generated_images)
+        image = np.concatenate((combine_images(image_no),combine_images(generated_images)),axis=1)
         image = image*127.5+127.5
         Image.fromarray(image.astype(np.uint8)).save(
             val_dir+"/epoch-{:03d}.png".format(epoch))
+
+        # testing
+        rand_p = np.random.permutation(X_test.shape[0])
+        X_test, X_test_no, y_test  = X_test[rand_p], X_test_no[rand_p], y_test[rand_p]
+        img_test = np.zeros((100,28,28,1))
+        img_gt = np.zeros((100,28,28,1))
+        for y in range(10):
+    		y_idx = np.where(y_test==y)
+    		img_test[y*10:(y+1)*10,:,:,:] = X_test_no[y_idx[0][:10]]
+    		img_gt[y*10:(y+1)*10,:,:,:] = X_test[y_idx[0][:10]]
+		img_result = g.predict(img_test, verbose=0)
+
+		image = np.concatenate((combine_images(img_test),
+								np.ones((280,10)),
+		                        combine_images(img_result),
+								np.ones((280,10)),
+		                        combine_images(img_gt)),axis=1)
+		image = image*127.5+127.5
+        Image.fromarray(image.astype(np.uint8)).save(
+            test_dir+"/epoch-{:03d}.png".format(epoch))
 
 
 def generate(BATCH_SIZE, nice=False):
